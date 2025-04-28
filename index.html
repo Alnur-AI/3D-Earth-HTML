@@ -1,0 +1,522 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <title>3D Земля</title>
+  <style>
+    body { margin: 0; overflow: hidden; }
+    canvas { display: block; }
+    #notify {
+      position: absolute;
+      top: 10px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(0,0,0,0.7);
+      color: #fff;
+      padding: 10px 20px;
+      border-radius: 8px;
+      font-family: sans-serif;
+      z-index: 10;
+      pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+  <div id="notify">Нажмите на кнопку V для полёта</div>
+  <div id="hud" style="position:absolute;top:10px;left:10px;background:rgba(0,0,0,0.7);color:#fff;padding:10px 20px;border-radius:8px;font-family:sans-serif;z-index:10;pointer-events:none;white-space:pre;min-width:180px;"></div>
+  <div id="country-info" style="position:absolute;top:10px;right:10px;background:rgba(0,0,0,0.7);color:#fff;padding:10px 20px;border-radius:8px;font-family:sans-serif;z-index:10;pointer-events:none;min-width:180px;"></div>
+  <script src="https://cdn.jsdelivr.net/npm/@turf/turf@6.5.0/turf.min.js"></script>
+  <script type="module">
+    import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.155.0/build/three.module.js';
+
+    // Сцена, камера, рендерер
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 20000);
+    const renderer = new THREE.WebGLRenderer({antialias: true});
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    document.body.appendChild(renderer.domElement);
+
+    // Текстуры высокого разрешения с CORS
+    const textureLoader = new THREE.TextureLoader();
+    const earthTexture = textureLoader.load('https://threejs.org/examples/textures/planets/earth_atmos_2048.jpg');
+    const cloudTexture = textureLoader.load('https://threejs.org/examples/textures/planets/earth_clouds_1024.png');
+
+    // Сфера (Земля)
+    const geometry = new THREE.SphereGeometry(2000, 128, 128); // радиус 2000 (в 10 раз больше)
+    const material = new THREE.MeshPhongMaterial({ map: earthTexture });
+    const earth = new THREE.Mesh(geometry, material);
+    scene.add(earth);
+
+    // Сфера облаков
+    const cloudGeometry = new THREE.SphereGeometry(2003, 128, 128); // чуть больше
+    const cloudMaterial = new THREE.MeshPhongMaterial({
+      map: cloudTexture,
+      transparent: true,
+      opacity: 0.8,
+      depthWrite: false
+    });
+    const clouds = new THREE.Mesh(cloudGeometry, cloudMaterial);
+    scene.add(clouds);
+
+    // Свет
+    const light = new THREE.DirectionalLight(0xffffff, 1);
+    light.position.set(5, 3, 5);
+    scene.add(light);
+
+    camera.position.z = 6000; // в 10 раз дальше
+
+    // --- Управление полётом ---
+    let flyMode = false;
+    let velocity = new THREE.Vector3();
+    let direction = new THREE.Vector3();
+    let moveForward = false, moveBackward = false, moveLeft = false, moveRight = false;
+    let moveUp = false, moveDown = false;
+    let canLook = false;
+    let prevMouse = {x: 0, y: 0};
+    let pitch = 0, yaw = 0;
+
+    function enableFlyMode() {
+      flyMode = true;
+      document.getElementById('notify').style.display = 'none';
+      velocity.set(0,0,0);
+      pitch = 0;
+      yaw = 0;
+      prevMouse.x = 0;
+      prevMouse.y = 0;
+    }
+
+    document.addEventListener('keydown', (e) => {
+      if (e.code === 'KeyV') enableFlyMode();
+      if (!flyMode) return;
+      if (e.code === 'KeyW') moveForward = true;
+      if (e.code === 'KeyS') moveBackward = true;
+      if (e.code === 'KeyA') moveLeft = true;
+      if (e.code === 'KeyD') moveRight = true;
+      if (e.code === 'Space') moveUp = true;
+      if (e.code === 'ShiftLeft') moveDown = true;
+    });
+    document.addEventListener('keyup', (e) => {
+      if (!flyMode) return;
+      if (e.code === 'KeyW') moveForward = false;
+      if (e.code === 'KeyS') moveBackward = false;
+      if (e.code === 'KeyA') moveLeft = false;
+      if (e.code === 'KeyD') moveRight = false;
+      if (e.code === 'Space') moveUp = false;
+      if (e.code === 'ShiftLeft') moveDown = false;
+    });
+
+    renderer.domElement.addEventListener('mousedown', (e) => {
+      if (!flyMode) return;
+      canLook = true;
+      prevMouse.x = e.clientX;
+      prevMouse.y = e.clientY;
+    });
+    renderer.domElement.addEventListener('mouseup', () => {
+      canLook = false;
+    });
+    renderer.domElement.addEventListener('mousemove', (e) => {
+      if (!flyMode || !canLook) return;
+      const dx = e.clientX - prevMouse.x;
+      const dy = e.clientY - prevMouse.y;
+      prevMouse.x = e.clientX;
+      prevMouse.y = e.clientY;
+      yaw -= dx * 0.002;
+      pitch -= dy * 0.002;
+      pitch = Math.max(-Math.PI/2, Math.min(Math.PI/2, pitch));
+    });
+
+    let borderGroup = null; // глобальная переменная для группы границ
+    let populationData = null;
+
+    function animate() {
+      requestAnimationFrame(animate);
+      earth.rotation.y += 0.0005;
+      clouds.rotation.y += 0.0007;
+      if (borderGroup) borderGroup.rotation.y += 0.0005; // вращаем границы синхронно с планетой
+      if (flyMode) {
+        camera.rotation.order = 'YXZ';
+        camera.rotation.y = yaw;
+        camera.rotation.x = pitch;
+        camera.rotation.z = 0;
+        direction.set(0,0,0);
+        // Вектор направления взгляда (forward)
+        const forward = new THREE.Vector3(0, 0, -1).applyEuler(camera.rotation).normalize();
+        // Вектор вправо
+        const right = new THREE.Vector3(1, 0, 0).applyEuler(camera.rotation).normalize();
+        // Вектор вверх
+        const up = new THREE.Vector3(0, 1, 0).applyEuler(camera.rotation).normalize();
+        if (moveForward) direction.add(forward);
+        if (moveBackward) direction.sub(forward);
+        if (moveLeft) direction.sub(right);
+        if (moveRight) direction.add(right);
+        if (moveUp) direction.add(up);
+        if (moveDown) direction.sub(up);
+        direction.normalize();
+        // --- Динамическая скорость ---
+        const minSpeed = 2.0;
+        const maxSpeed = 20.0;
+        const minDist = 250;
+        const maxDist = 2000;
+        const dist = camera.position.length();
+        let speed = maxSpeed;
+        if (dist < maxDist) {
+          speed = minSpeed + (maxSpeed - minSpeed) * ((dist - minDist) / (maxDist - minDist));
+          speed = Math.max(minSpeed, Math.min(maxSpeed, speed));
+        }
+        // --- Относительная скорость между планетой и игроком ---
+        // Скорость вращения планеты по поверхности в точке под игроком
+        const planetAngularSpeed = 0.0005; // рад/кадр
+        // Вектор от центра планеты к игроку
+        const playerVec = camera.position.clone();
+        // Радиус планеты
+        const planetRadius = 2000;
+        // Вектор скорости поверхности планеты в точке игрока (вращение вокруг Y)
+        const surfaceVel = new THREE.Vector3(-playerVec.z, 0, playerVec.x).normalize().multiplyScalar(planetAngularSpeed * planetRadius);
+        // Скорость игрока (за кадр)
+        let playerVel = new THREE.Vector3();
+        if (direction.length() > 0) {
+          playerVel.copy(direction).multiplyScalar(speed);
+        }
+        // Относительная скорость (модуль разности векторов)
+        const relativeSpeed = playerVel.clone().sub(surfaceVel).length();
+        if (direction.length() > 0) {
+          camera.position.add(direction.multiplyScalar(speed));
+        }
+        // HUD: координаты, скорость и относительная скорость
+        const hud = document.getElementById('hud');
+        const radius3D = 2000;
+        const earthRadiusKm = 6371;
+        const scale = earthRadiusKm / radius3D;
+        const distToSurface = (camera.position.length() - radius3D) * scale;
+        hud.textContent = `Координаты:\nX: ${camera.position.x.toFixed(2)}\nY: ${camera.position.y.toFixed(2)}\nZ: ${camera.position.z.toFixed(2)}\nСкорость: ${speed.toFixed(3)}\nОтн. скорость: ${relativeSpeed.toFixed(3)}\nРасстояние до поверхности: ${distToSurface.toFixed(1)} км`;
+      } else {
+        document.getElementById('hud').textContent = '';
+      }
+      renderer.render(scene, camera);
+    }
+    animate();
+
+    window.addEventListener('resize', () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+    // Сфера-ореол (outline)
+    const outlineGeometry = new THREE.SphereGeometry(2080, 128, 128); // чуть больше
+    const outlineMaterial = new THREE.MeshBasicMaterial({
+      color: 0xffffff,
+      transparent: true,
+      opacity: 0.5,
+      side: THREE.BackSide
+    });
+    const outline = new THREE.Mesh(outlineGeometry, outlineMaterial);
+    scene.add(outline);
+
+    // === Выделение страны по клику ===
+    let geojsonData = null;
+    let selectedCountry = null;
+    let selectedCountryMesh = null;
+    let highlightPhase = 0;
+
+    // Загрузка GeoJSON с сохранением
+    async function addCountryBordersFromGeoJSON() {
+      const url = 'https://raw.githubusercontent.com/datasets/geo-countries/master/data/countries.geojson';
+      const response = await fetch(url);
+      geojsonData = await response.json();
+      const borderMaterial = new THREE.LineBasicMaterial({ color: 0xffff00 });
+      borderGroup = new THREE.Group();
+      const radius = 2000.05; // чуть больше радиуса планеты
+
+      function latLonToVector3(lat, lon, r) {
+        const phi = (90 - lat) * Math.PI / 180;
+        const theta = (lon + 180) * Math.PI / 180;
+        return new THREE.Vector3(
+          -r * Math.sin(phi) * Math.cos(theta),
+           r * Math.cos(phi),
+           r * Math.sin(phi) * Math.sin(theta)
+        );
+      }
+
+      geojsonData.features.forEach(feature => {
+        const coords = feature.geometry.coordinates;
+        if (feature.geometry.type === 'Polygon') {
+          coords.forEach(ring => {
+            const points = ring.map(([lon, lat]) => latLonToVector3(lat, lon, radius));
+            const geometry = new THREE.BufferGeometry().setFromPoints(points);
+            const line = new THREE.Line(geometry, borderMaterial);
+            borderGroup.add(line);
+          });
+        } else if (feature.geometry.type === 'MultiPolygon') {
+          coords.forEach(polygon => {
+            polygon.forEach(ring => {
+              const points = ring.map(([lon, lat]) => latLonToVector3(lat, lon, radius));
+              const geometry = new THREE.BufferGeometry().setFromPoints(points);
+              const line = new THREE.Line(geometry, borderMaterial);
+              borderGroup.add(line);
+            });
+          });
+        }
+      });
+      scene.add(borderGroup);
+    }
+    addCountryBordersFromGeoJSON();
+
+    // Преобразование 3D-точки в широту/долготу
+    function vector3ToLatLon(vec) {
+      const r = vec.length();
+      const lat = 90 - (Math.acos(vec.y / r)) * 180 / Math.PI;
+      let lon = Math.atan2(vec.z, -vec.x) * 180 / Math.PI - 180;
+      if (lon < -180) lon += 360;
+      if (lon > 180) lon -= 360;
+      return [lon, lat];
+    }
+
+    // Обработка клика мыши
+    renderer.domElement.addEventListener('click', (event) => {
+      // Получаем координаты мыши
+      const rect = renderer.domElement.getBoundingClientRect();
+      const mouse = new THREE.Vector2(
+        ((event.clientX - rect.left) / rect.width) * 2 - 1,
+        -((event.clientY - rect.top) / rect.height) * 2 + 1
+      );
+      // Луч
+      const raycaster = new THREE.Raycaster();
+      raycaster.setFromCamera(mouse, camera);
+      // Пересечение с планетой
+      const intersects = raycaster.intersectObject(earth);
+      if (intersects.length > 0 && geojsonData) {
+        let point = intersects[0].point.clone();
+        // Сначала инвертируем вращение планеты (Y)
+        const inverseRot = new THREE.Matrix4().makeRotationY(-earth.rotation.y);
+        point.applyMatrix4(inverseRot);
+        // Проверка: точка на видимой стороне относительно камеры (после инверсии)
+        const cameraPos = camera.position.clone().applyMatrix4(inverseRot);
+        const cameraDir = cameraPos.clone().normalize();
+        const pointDir = point.clone().normalize();
+        if (cameraDir.dot(pointDir) < 0) return; // клик сзади планеты — игнорируем
+        const [lon, lat] = vector3ToLatLon(point);
+        // Проверяем, в какую страну попали
+        let found = null;
+        for (const feature of geojsonData.features) {
+          if (turf.booleanPointInPolygon([lon, lat], feature)) {
+            found = feature;
+            break;
+          }
+        }
+        if (found) {
+          selectedCountry = found;
+          showCountryInfo(found.properties.ADMIN || found.properties.name || 'Страна не найдена', found);
+          highlightCountry(found);
+        } else {
+          selectedCountry = null;
+          showCountryInfo('Страна не найдена');
+          removeHighlight();
+        }
+      }
+    });
+
+    // Загрузка данных о населении
+    async function loadPopulationData() {
+      const url = 'https://raw.githubusercontent.com/samayo/country-json/master/src/country-by-population.json';
+      const response = await fetch(url);
+      const data = await response.json();
+      populationData = new Map();
+      data.forEach(item => {
+        if (item.country && item.population) {
+          populationData.set(item.country.trim().toLowerCase(), item.population);
+        }
+      });
+      // После загрузки обновить инфо, если страна уже выделена
+      if (selectedCountry) {
+        showCountryInfo(selectedCountry.properties.ADMIN || selectedCountry.properties.name || 'Страна не найдена', selectedCountry);
+      }
+    }
+    loadPopulationData();
+
+    function showCountryInfo(name, feature = null) {
+      let info = `Страна: ${name}`;
+      let pop = null;
+      if (populationData && feature) {
+        // Пробуем разные варианты названия
+        const tryNames = [];
+        if (feature.properties.ADMIN) tryNames.push(feature.properties.ADMIN);
+        if (feature.properties.name) tryNames.push(feature.properties.name);
+        if (feature.properties.ISO_A3) tryNames.push(feature.properties.ISO_A3);
+        tryNames.push(name);
+        // Удаляем лишние символы и приводим к нижнему регистру
+        const clean = s => s.trim().toLowerCase().replace(/[^a-zа-яё\s]/gi, '');
+        for (let n of tryNames) {
+          n = clean(n);
+          for (let [country, p] of populationData.entries()) {
+            if (clean(country) === n) {
+              pop = p;
+              break;
+            }
+          }
+          if (pop) break;
+        }
+        // Если не нашли — пробуем частичное совпадение
+        if (!pop) {
+          for (let n of tryNames) {
+            n = clean(n);
+            for (let [country, p] of populationData.entries()) {
+              if (clean(country).includes(n) || n.includes(clean(country))) {
+                pop = p;
+                break;
+              }
+            }
+            if (pop) break;
+          }
+        }
+        if (pop) {
+          info += `\nНаселение: ${pop.toLocaleString('ru-RU')}`;
+        }
+      }
+      document.getElementById('country-info').innerHTML = info.replace(/\n/g, '<br>');
+    }
+
+    function removeHighlight() {
+      if (selectedCountryMesh) {
+        // Удаляем из borderGroup, если он там
+        if (borderGroup && borderGroup.children.includes(selectedCountryMesh)) {
+          borderGroup.remove(selectedCountryMesh);
+        } else {
+          scene.remove(selectedCountryMesh);
+        }
+        selectedCountryMesh.traverse(obj => {
+          if (obj.geometry) obj.geometry.dispose();
+          if (obj.material) obj.material.dispose();
+        });
+        selectedCountryMesh = null;
+      }
+    }
+
+    function highlightCountry(feature) {
+      removeHighlight();
+      const radius = 2000.2; // увеличено на 0.1 для подсветки
+      const meshes = [];
+      const fillMeshes = [];
+      const coords = feature.geometry.coordinates;
+      function latLonToVector3(lat, lon, r) {
+        const phi = (90 - lat) * Math.PI / 180;
+        const theta = (lon + 180) * Math.PI / 180;
+        return new THREE.Vector3(
+          -r * Math.sin(phi) * Math.cos(theta),
+           r * Math.cos(phi),
+           r * Math.sin(phi) * Math.sin(theta)
+        );
+      }
+      if (feature.geometry.type === 'Polygon') {
+        coords.forEach(ring => {
+          // Линия границы
+          const geometry = new THREE.BufferGeometry().setFromPoints(ring.map(([lon, lat]) => latLonToVector3(lat, lon, radius)));
+          const mat = new THREE.LineBasicMaterial({ color: 0xffff00, depthTest: false });
+          const line = new THREE.Line(geometry, mat);
+          line.renderOrder = 999;
+          meshes.push(line);
+          // Меш-подсветка
+          const shapePts = ring.map(([lon, lat]) => latLonToVector3(lat, lon, radius));
+          if (shapePts.length >= 3) {
+            // Триангуляция в 2D (проекция на локальную плоскость)
+            // 1. Находим центр
+            const center = shapePts.reduce((acc, v) => acc.add(v), new THREE.Vector3()).divideScalar(shapePts.length);
+            // 2. Строим локальную систему координат
+            const normal = center.clone().normalize();
+            const tangent = new THREE.Vector3(0,1,0).cross(normal).normalize();
+            const bitangent = normal.clone().cross(tangent).normalize();
+            // 3. Проецируем точки в 2D
+            const pts2d = shapePts.map(v => {
+              const rel = v.clone().sub(center);
+              return new THREE.Vector2(rel.dot(tangent), rel.dot(bitangent));
+            });
+            // 4. Триангуляция
+            const indices = THREE.ShapeUtils.triangulateShape(pts2d, []);
+            // 5. Создаём BufferGeometry
+            const geom = new THREE.BufferGeometry();
+            const positions = new Float32Array(shapePts.length * 3);
+            shapePts.forEach((v, i) => {
+              positions[i*3] = v.x;
+              positions[i*3+1] = v.y;
+              positions[i*3+2] = v.z;
+            });
+            const indexArr = [];
+            indices.forEach(tri => tri.forEach(idx => indexArr.push(idx)));
+            geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+            geom.setIndex(indexArr);
+            geom.computeVertexNormals();
+            const fillMat = new THREE.MeshBasicMaterial({ color: 0xffff00, transparent: true, opacity: 0.5, side: THREE.DoubleSide, depthWrite: false, depthTest: false });
+            const fillMesh = new THREE.Mesh(geom, fillMat);
+            fillMesh.renderOrder = 999;
+            fillMeshes.push(fillMesh);
+          }
+        });
+      } else if (feature.geometry.type === 'MultiPolygon') {
+        coords.forEach(polygon => {
+          polygon.forEach(ring => {
+            const geometry = new THREE.BufferGeometry().setFromPoints(ring.map(([lon, lat]) => latLonToVector3(lat, lon, radius)));
+            const mat = new THREE.LineBasicMaterial({ color: 0xffff00, depthTest: false });
+            const line = new THREE.Line(geometry, mat);
+            line.renderOrder = 999;
+            meshes.push(line);
+            const shapePts = ring.map(([lon, lat]) => latLonToVector3(lat, lon, radius));
+            if (shapePts.length >= 3) {
+              const center = shapePts.reduce((acc, v) => acc.add(v), new THREE.Vector3()).divideScalar(shapePts.length);
+              const normal = center.clone().normalize();
+              const tangent = new THREE.Vector3(0,1,0).cross(normal).normalize();
+              const bitangent = normal.clone().cross(tangent).normalize();
+              const pts2d = shapePts.map(v => {
+                const rel = v.clone().sub(center);
+                return new THREE.Vector2(rel.dot(tangent), rel.dot(bitangent));
+              });
+              const indices = THREE.ShapeUtils.triangulateShape(pts2d, []);
+              const geom = new THREE.BufferGeometry();
+              const positions = new Float32Array(shapePts.length * 3);
+              shapePts.forEach((v, i) => {
+                positions[i*3] = v.x;
+                positions[i*3+1] = v.y;
+                positions[i*3+2] = v.z;
+              });
+              const indexArr = [];
+              indices.forEach(tri => tri.forEach(idx => indexArr.push(idx)));
+              geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+              geom.setIndex(indexArr);
+              geom.computeVertexNormals();
+              const fillMat = new THREE.MeshBasicMaterial({ color: 0xffff00, transparent: true, opacity: 0.5, side: THREE.DoubleSide, depthWrite: false, depthTest: false });
+              const fillMesh = new THREE.Mesh(geom, fillMat);
+              fillMesh.renderOrder = 999;
+              fillMeshes.push(fillMesh);
+            }
+          });
+        });
+      }
+      const group = new THREE.Group();
+      meshes.forEach(m => group.add(m));
+      fillMeshes.forEach(m => group.add(m));
+      group.renderOrder = 999;
+      // Добавляем выделение в ту же группу, что и границы, чтобы вращалось синхронно
+      if (borderGroup) {
+        borderGroup.add(group);
+      } else {
+        scene.add(group);
+      }
+      selectedCountryMesh = group;
+      selectedCountryMesh._fillMeshes = fillMeshes;
+    }
+
+    // Мигать подсветкой
+    function animateHighlight() {
+      if (selectedCountryMesh && selectedCountryMesh._fillMeshes) {
+        highlightPhase += 0.1;
+        const opacity = 0.3 + 0.2 * Math.abs(Math.sin(highlightPhase));
+        selectedCountryMesh._fillMeshes.forEach(mesh => {
+          if (mesh.material && mesh.material.transparent) {
+            mesh.material.opacity = opacity;
+          }
+        });
+      }
+      requestAnimationFrame(animateHighlight);
+    }
+    animateHighlight();
+  </script>
+</body>
+</html>
